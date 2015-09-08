@@ -1,0 +1,271 @@
+#!/usr/bin/env ruby
+
+require 'rest_client'
+require 'json'
+require 'simp/rpm'
+require 'digest/sha1'
+require 'highline/import'
+
+def spacer
+  puts "===================="
+end
+
+# Really stupid license translator....
+# Case will be ignored upon match
+LICENSE_XLAT = {
+  '(ASL|Apache)'                     => 'APACHE-2.0',
+  'MIT'                              => 'MIT',
+  '(LGPLv2|Lesser GNU.*2\.?)'        => 'LGPL-2.1',
+  '(LGPLv3|Lesser GNU.*3\.?)'        => 'LGPL-3.0',
+  '(GPL(\s+)?v2.*|GNU Public.*2\.?)' => 'GPL-2.0',
+  '(GPL(\s+)?v3.*|GNU Public.*3\.?)' => 'GPL-3.0',
+  'BSD'                              => 'BSD',
+  'Public\s*Domain'                  => 'Public Domain',
+  'OpenLDAP'                         => 'OpenLDAP',
+  'Python'                           => 'PythonPL',
+  'Artistic'                         => 'Artistic-Public-License',
+  'Ruby'                             => 'RPL-1.5'
+}
+
+# Set this to identify the reference repository in BinTray that should be used
+# to pick up package metadata so that you don't have to enter it all by hand.
+#
+# Ex: 5.1.X
+#
+# If not set, the script will try to use A.B.X based on the input SIMP_VERSION
+if ENV['SIMP_REF_REPO']
+  simp_ref_repo = ENV['SIMP_REF_REPO']
+end
+
+# Set this to specify the SIMP Version that you want to upload to
+if ENV['SIMP_VERSION']
+  simp_version = ENV['SIMP_VERSION']
+else
+  simp_version = ask("SIMP Version? ")
+end
+
+if ENV['BINTRAY_API_USER']
+  api_user= ENV['BINTRAY_API_USER']
+else
+  api_user= ''
+  while api_user.empty?
+    api_user= ask("BinTray API User? ")
+  end
+end
+
+if ENV['BINTRAY_API_KEY']
+  api_key = ENV['BINTRAY_API_KEY']
+else
+  api_key = ''
+  while api_key.empty?
+    api_key = ask("BinTray API Key? ")
+  end
+end
+
+limit_check = RestClient.get("https://#{api_user}:#{api_key}@api.bintray.com/repos/simp")
+rate_limit = limit_check.headers[:x_ratelimit_limit].to_i
+rate_remaining = limit_check.headers[:x_ratelimit_remaining].to_i
+
+puts "="*50
+puts "You have #{rate_remaining} of #{rate_limit} API queries remaining for the day"
+puts "="*50
+
+[simp_version, %(#{simp_version}-Source)].each do |repo|
+  begin
+    RestClient.get("https://api.bintray.com/repos/simp/#{repo}/")
+  rescue => e
+    unless e.response.code == 404
+      fail "Error: #{e}"
+    end
+
+    # If we get here, the repo does not exist
+    if repo == %(#{simp_version}-Source)
+      repo_type = 'Source'
+    else
+      repo_type = 'Production'
+    end
+
+    repo_metadata = {
+      'type' => 'rpm',
+      'private' => false,
+      'premium' => false,
+      'desc' => "This repository hosts #{repo_type} packages for SIMP #{simp_version}",
+      'labels' => ['simp']
+    }
+
+    RestClient.post(
+      "https://#{api_user}:#{api_key}@api.bintray.com/repos/simp/#{repo}",
+      JSON.generate(repo_metadata),
+      {:content_type => :json}
+    )
+  end
+end
+
+# Page through all of the query results and return the final data structure
+def collate_query(query)
+  results = []
+
+  more_results = true
+  zero_count = 0
+  total_results = nil
+  next_startpos = 0
+  while more_results && (zero_count < 2) do
+    if query =~ /\?/
+      pos_query = %{#{query}&start_pos=#{next_startpos}}
+    else
+      pos_query = %{#{query}?start_pos=#{next_startpos}}
+    end
+
+    rest_output = RestClient.get(pos_query)
+    results += JSON.parse(rest_output)
+
+    total_results = rest_output.headers[:x_rangelimit_total].to_i unless total_results
+    startpos = rest_output.headers[:x_rangelimit_startpos].to_i
+    endpos = rest_output.headers[:x_rangelimit_endpos].to_i
+    next_startpos = endpos + 1
+
+    # Make sure we don't create an endless loop and DoS someone's system
+    zero_count += 1 if (startpos == 0)
+
+    if next_startpos >= total_results
+      more_results = false
+    end
+  end
+
+  results
+end
+
+# For some reason, we need to authenticate to get more than the first batch of these
+published_files = collate_query("https://#{api_user}:#{api_key}@api.bintray.com/search/file?name=*&subject=simp&repo=#{simp_version}")
+
+package_list = collate_query("https://api.bintray.com/repos/simp/#{simp_version}/packages").collect{|x| x = JSON.parse(RestClient.get("https://api.bintray.com/packages/simp/#{simp_version}/#{x['name']}"))}
+
+src_published_files = collate_query("https://#{api_user}:#{api_key}@api.bintray.com/search/file?name=*&subject=simp&repo=#{simp_version}-Source")
+src_package_list = collate_query("https://api.bintray.com/repos/simp/#{simp_version}-Source/packages").collect{|x| x = JSON.parse(RestClient.get("https://api.bintray.com/packages/simp/#{simp_version}-Source/#{x['name']}"))}
+
+if simp_ref_repo
+  head_version = simp_ref_repo
+else
+  head_version = simp_version.split('.')[0..1].join('.') + '.X'
+end
+
+if head_version == simp_version
+  head_published_files = published_files
+  head_package_list = package_list
+else
+  head_published_files = collate_query("https://#{api_user}:#{api_key}@api.bintray.com/search/file?name=*&subject=simp&repo=#{head_version}")
+  head_package_list = collate_query("https://api.bintray.com/repos/simp/#{head_version}/packages").collect{|x| x = JSON.parse(RestClient.get("https://api.bintray.com/packages/simp/#{head_version}/#{x['name']}"))}
+end
+
+Dir.glob("*.rpm").sort.each do |rpm|
+  # Check to see if this thing is worth uploading
+
+  rpm_check = %x(rpm -K #{rpm})
+  rpm_check = rpm_check.split(':')[1..-1]
+  if rpm_check.grep(/pgp/i).empty?
+    $stderr.puts("Warning: #{rpm} is not signed, SKIPPING")
+    next
+  end
+
+  rpm_info = Simp::RPM.get_info(rpm)
+  rpm_license = rpm_info[:license]
+  license = nil
+  if rpm_license
+    LICENSE_XLAT.each_key do |regexp|
+      if Regexp.new(regexp,true).match(%(#{rpm_license}))
+        license = LICENSE_XLAT[regexp]
+        break
+      end
+    end
+  end
+
+  vcs_url = nil
+  labels = nil
+  issue_tracker = nil
+
+  if rpm =~ /\.src\.rpm$/
+    src_rpm = true
+    repo_name = "#{simp_version}-Source"
+
+    _package_list = src_package_list.dup
+    _published_files = src_published_files.dup
+  else
+    src_rpm = false
+    repo_name = simp_version
+
+    _package_list = package_list.dup
+    _published_files = published_files.dup
+  end
+
+  # Try to get the regular Package info to reuse
+  info = (_package_list + head_package_list).select do |x|
+    x['name'] == rpm_info[:name]
+  end.first
+
+  unless (info.nil? || info.empty?)
+    license = info['license'] if info['license']
+    vcs_url = info['vcs_url'] if info['vcs_url']
+    labels = info['labels'] if info['labels']
+    issue_tracker = info['issue_tracker_url'] if info['issue_tracker_url']
+  end
+
+  puts("Processing #{rpm}")
+
+  puts('Generating Checksum (this may take some time)')
+  rpm_checksum = Digest::SHA1.hexdigest(File.read(rpm))
+
+  if _package_list.select{|x| x['name'] == rpm_info[:name]}.empty?
+    spacer
+    puts("Working on package: #{rpm}")
+    spacer
+    license = ask("License? ") {|q| q.default = 'Apache-2.0'} unless license
+    vcs_url = ask("VCS URL? ") {|q| q.default = 'https://github.com/simp'} unless vcs_url
+    labels = ask("Labels? (comma sep) ", lambda {|str| str.split(/\s*,\s*/)}) unless labels
+    issue_tracker = ask("Issue Tracker? ") {|q| q.default = 'https://simp-project.atlassian.net'} unless issue_tracker
+
+    package_data = {
+      "name" => rpm_info[:name],
+      "desc" => rpm_info[:summary],
+      "labels" => labels,
+      "licenses" => Array(license),
+      "issue_tracker_url" => issue_tracker,
+      "vcs_url" => vcs_url,
+      "public_download_numbers" => true,
+      "public_stats" => true
+    }
+
+    begin
+      RestClient.post(
+        "https://#{api_user}:#{api_key}@api.bintray.com/packages/simp/#{repo_name}",
+        JSON.generate(package_data),
+        {:content_type => :json}
+      )
+    rescue Exception => e
+      fail("Could not create Package #{rpm_info[:name]}: #{e}: #{JSON.parse(e.http_body)['message']}")
+    end
+  end
+
+  file_exists = (!_published_files.select{|x| x['package'] == rpm_info[:name]}.empty? &&
+                (_published_files.select{|x| x['package'] == rpm_info[:name]}.first['sha1'] == rpm_checksum))
+
+  unless file_exists
+    curl_cmd = %(curl -# -T #{rpm} ) +
+      %(-u#{api_user}:#{api_key} ) +
+      %(https://api.bintray.com/content/simp/#{repo_name}/#{rpm_info[:name]}/#{rpm_info[:version]}/#{rpm})
+
+    %x(#{curl_cmd})
+    $stdout.flush
+    $stderr.puts("Could not upload #{rpm}") unless $?.success?
+
+    puts("Publishing #{rpm}")
+    publish_package = {
+      "discard" => false,
+      "publish_wait_for_secs" => 0
+    }
+    RestClient.post(
+      "https://#{api_user}:#{api_key}@api.bintray.com/content/simp/#{repo_name}/#{rpm_info[:name]}/#{rpm_info[:version]}/publish",
+      JSON.generate(publish_package),
+      {:content_type => :json}
+    )
+  end
+end
