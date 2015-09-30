@@ -154,10 +154,36 @@ if head_version == simp_version
   head_package_list = package_list
 else
   head_published_files = collate_query("https://#{api_user}:#{api_key}@api.bintray.com/search/file?name=*&subject=simp&repo=#{head_version}")
+  head_src_published_files = collate_query("https://#{api_user}:#{api_key}@api.bintray.com/search/file?name=*&subject=simp&repo=#{head_version}-Source")
   head_package_list = collate_query("https://api.bintray.com/repos/simp/#{head_version}/packages").collect{|x| x = JSON.parse(RestClient.get("https://api.bintray.com/packages/simp/#{head_version}/#{x['name']}"))}
 end
 
 Dir.glob("*.rpm").sort.each do |rpm|
+  rpm_info = Simp::RPM.get_info(rpm)
+
+  puts("Processing #{rpm}")
+
+  puts('Generating Checksum (this may take some time)')
+  rpm_checksum = Digest::SHA1.hexdigest(File.read(rpm))
+
+  # If we already have this version in the head_published_files, then use
+  # that version instead of the local version.
+  #
+  # This prevents issues with the fact that our code regenerates, and
+  # resigns, everything thus invalidating the comparison checksum.
+
+  existing_file = (head_published_files + head_src_published_files).select{|x| x['name'] == File.basename(rpm) }.first
+
+  if existing_file && ( existing_file['sha1'] != rpm_checksum )
+    # Go ahead and overwrite the local file with the correct remote one.
+
+    puts "Replacing #{rpm_info[:name]} with the existing published version"
+
+    %x(curl -# -L https://bintray.com/artifact/download/simp/#{existing_file['repo']}/#{existing_file['name']} > #{existing_file['name']})
+    $stdout.flush
+    $stderr.puts("Could not fetch existing RPM #{rpm[:name]}") unless $?.success?
+  end
+
   # Check to see if this thing is worth uploading
 
   rpm_check = %x(rpm -K #{rpm})
@@ -167,7 +193,6 @@ Dir.glob("*.rpm").sort.each do |rpm|
     next
   end
 
-  rpm_info = Simp::RPM.get_info(rpm)
   rpm_license = rpm_info[:license]
   license = nil
   if rpm_license
@@ -203,16 +228,11 @@ Dir.glob("*.rpm").sort.each do |rpm|
   end.first
 
   unless (info.nil? || info.empty?)
-    license = info['license'] if info['license']
+    license = info['licenses'] if info['licenses']
     vcs_url = info['vcs_url'] if info['vcs_url']
     labels = info['labels'] if info['labels']
     issue_tracker = info['issue_tracker_url'] if info['issue_tracker_url']
   end
-
-  puts("Processing #{rpm}")
-
-  puts('Generating Checksum (this may take some time)')
-  rpm_checksum = Digest::SHA1.hexdigest(File.read(rpm))
 
   if _package_list.select{|x| x['name'] == rpm_info[:name]}.empty?
     spacer

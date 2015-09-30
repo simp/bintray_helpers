@@ -1,0 +1,35 @@
+#!/usr/bin/env ruby
+
+require 'rest_client'
+require 'json'
+require 'highline/import'
+
+def spacer
+  puts "===================="
+end
+
+if ENV['BINTRAY_API_USER']
+  api_user= ENV['BINTRAY_API_USER']
+else
+  api_user= ''
+  while api_user.empty?
+    api_user= ask("BinTray API User? ")
+  end
+end
+
+if ENV['BINTRAY_API_KEY']
+  api_key = ENV['BINTRAY_API_KEY']
+else
+  api_key = ''
+  while api_key.empty?
+    api_key = ask("BinTray API Key? ")
+  end
+end
+
+limit_check = RestClient.get("https://#{api_user}:#{api_key}@api.bintray.com/repos/simp")
+rate_limit = limit_check.headers[:x_ratelimit_limit].to_i
+rate_remaining = limit_check.headers[:x_ratelimit_remaining].to_i
+
+puts "="*50
+puts "You have #{rate_remaining} of #{rate_limit} API queries remaining for the day"
+puts "="*50
