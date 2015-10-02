@@ -104,31 +104,37 @@ end
 # Page through all of the query results and return the final data structure
 def collate_query(query)
   results = []
-
+  
   more_results = true
   zero_count = 0
   total_results = nil
   next_startpos = 0
   while more_results && (zero_count < 2) do
-    if query =~ /\?/
-      pos_query = %{#{query}&start_pos=#{next_startpos}}
-    else
-      pos_query = %{#{query}?start_pos=#{next_startpos}}
-    end
-
-    rest_output = RestClient.get(pos_query)
-    results += JSON.parse(rest_output)
-
-    total_results = rest_output.headers[:x_rangelimit_total].to_i unless total_results
-    startpos = rest_output.headers[:x_rangelimit_startpos].to_i
-    endpos = rest_output.headers[:x_rangelimit_endpos].to_i
-    next_startpos = endpos + 1
-
-    # Make sure we don't create an endless loop and DoS someone's system
-    zero_count += 1 if (startpos == 0)
-
-    if next_startpos >= total_results
-      more_results = false
+    begin
+      if query =~ /\?/
+        pos_query = %{#{query}&start_pos=#{next_startpos}}
+      else
+        pos_query = %{#{query}?start_pos=#{next_startpos}}
+      end
+  
+      rest_output = RestClient.get(pos_query)
+      results += JSON.parse(rest_output)
+  
+      total_results = rest_output.headers[:x_rangelimit_total].to_i unless total_results
+      startpos = rest_output.headers[:x_rangelimit_startpos].to_i
+      endpos = rest_output.headers[:x_rangelimit_endpos].to_i
+      next_startpos = endpos + 1
+  
+      # Make sure we don't create an endless loop and DoS someone's system
+      zero_count += 1 if (startpos == 0)
+  
+      if next_startpos >= total_results
+        more_results = false
+      end
+    rescue RestClient::BadRequest => e
+      puts "Bad Request: #{e.message}"
+      puts "Original Query: #{pos_query}"
+      exit 1
     end
   end
 
@@ -138,7 +144,7 @@ end
 # For some reason, we need to authenticate to get more than the first batch of these
 published_files = collate_query("https://#{api_user}:#{api_key}@api.bintray.com/search/file?name=*&subject=simp&repo=#{simp_version}")
 
-package_list = collate_query("https://api.bintray.com/repos/simp/#{simp_version}/packages").collect{|x| x = JSON.parse(RestClient.get("https://api.bintray.com/packages/simp/#{simp_version}/#{x['name']}"))}
+package_list = collate_query("https://#{api_user}:#{api_key}@api.bintray.com/repos/simp/#{simp_version}/packages").collect{|x| x = JSON.parse(RestClient.get("https://api.bintray.com/packages/simp/#{simp_version}/#{x['name']}"))}
 
 src_published_files = collate_query("https://#{api_user}:#{api_key}@api.bintray.com/search/file?name=*&subject=simp&repo=#{simp_version}-Source")
 src_package_list = collate_query("https://api.bintray.com/repos/simp/#{simp_version}-Source/packages").collect{|x| x = JSON.parse(RestClient.get("https://api.bintray.com/packages/simp/#{simp_version}-Source/#{x['name']}"))}
@@ -155,7 +161,7 @@ if head_version == simp_version
 else
   head_published_files = collate_query("https://#{api_user}:#{api_key}@api.bintray.com/search/file?name=*&subject=simp&repo=#{head_version}")
   head_src_published_files = collate_query("https://#{api_user}:#{api_key}@api.bintray.com/search/file?name=*&subject=simp&repo=#{head_version}-Source")
-  head_package_list = collate_query("https://api.bintray.com/repos/simp/#{head_version}/packages").collect{|x| x = JSON.parse(RestClient.get("https://api.bintray.com/packages/simp/#{head_version}/#{x['name']}"))}
+  head_package_list = collate_query("https://#{api_user}:#{api_key}@api.bintray.com/repos/simp/#{head_version}/packages").collect{|x| x = JSON.parse(RestClient.get("https://api.bintray.com/packages/simp/#{head_version}/#{x['name']}"))}
 end
 
 Dir.glob("*.rpm").sort.each do |rpm|
@@ -261,7 +267,10 @@ Dir.glob("*.rpm").sort.each do |rpm|
         {:content_type => :json}
       )
     rescue Exception => e
-      fail("Could not create Package #{rpm_info[:name]}: #{e}: #{JSON.parse(e.http_body)['message']}")
+      # Ignore conflicts...
+      unless e.to_s =~ /409 Conflict/
+        fail("Could not create Package #{rpm_info[:name]}: #{e}: #{JSON.parse(e.http_body)['message']}")
+      end
     end
   end
 
@@ -282,10 +291,14 @@ Dir.glob("*.rpm").sort.each do |rpm|
       "discard" => false,
       "publish_wait_for_secs" => 0
     }
-    RestClient.post(
-      "https://#{api_user}:#{api_key}@api.bintray.com/content/simp/#{repo_name}/#{rpm_info[:name]}/#{rpm_info[:version]}/publish",
-      JSON.generate(publish_package),
-      {:content_type => :json}
-    )
+
+    publish_post = "https://#{api_user}:#{api_key}@api.bintray.com/content/simp/#{repo_name}/#{rpm_info[:name]}/#{rpm_info[:version]}/publish"
+    begin
+      RestClient.post(publish_post, JSON.generate(publish_package), {:content_type => :json})
+    rescue Exception => e
+      puts "Bad Request: #{e.message}"
+      puts "Original Post: #{publish_post}"
+      exit 1
+    end
   end
 end
