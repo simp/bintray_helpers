@@ -86,10 +86,10 @@ def collate_query(query)
     rest_output = RestClient.get(pos_query)
     results += JSON.parse(rest_output)
 
-    total_results = rest_output.headers[:x_rangelimit_total].to_i unless total_results
+    total_results = (rest_output.headers[:x_rangelimit_total].to_i - 1) unless total_results
     startpos = rest_output.headers[:x_rangelimit_startpos].to_i
     endpos = rest_output.headers[:x_rangelimit_endpos].to_i
-    next_startpos = endpos + 1
+    next_startpos = endpos
 
     # Make sure we don't create an endless loop and DoS someone's system
     zero_count += 1 if (startpos == 0)
@@ -105,7 +105,7 @@ end
 # For some reason, we need to authenticate to get more than the first batch of these
 src_published_files = collate_query("https://#{api_user}:#{api_key}@api.bintray.com/search/file?name=*&subject=simp&repo=#{simp_src_repo}")
 
-src_package_list = collate_query("https://api.bintray.com/repos/simp/#{simp_src_repo}/packages").collect{|x| x = JSON.parse(RestClient.get("https://api.bintray.com/packages/simp/#{simp_src_repo}/#{x['name']}"))}
+src_package_list = collate_query("https://#{api_user}:#{api_key}@api.bintray.com/repos/simp/#{simp_src_repo}/packages").collect{|x| x = JSON.parse(RestClient.get("https://api.bintray.com/packages/simp/#{simp_src_repo}/#{x['name']}"))}
 
 begin
   target_published_files = collate_query("https://#{api_user}:#{api_key}@api.bintray.com/search/file?name=*&subject=simp&repo=#{simp_target_repo}")
@@ -114,7 +114,7 @@ rescue Exception => e
 end
 
 begin
-  target_package_list = collate_query("https://api.bintray.com/repos/simp/#{simp_target_repo}/packages").collect{|x| x = JSON.parse(RestClient.get("https://api.bintray.com/packages/simp/#{simp_target_repo}/#{x['name']}"))}
+  target_package_list = collate_query("https://#{api_user}:#{api_key}@api.bintray.com/repos/simp/#{simp_target_repo}/packages").collect{|x| x = JSON.parse(RestClient.get("https://api.bintray.com/packages/simp/#{simp_target_repo}/#{x['name']}"))}
 rescue Exception => e
   target_package_list = []
 end

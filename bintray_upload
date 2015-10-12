@@ -120,10 +120,10 @@ def collate_query(query)
       rest_output = RestClient.get(pos_query)
       results += JSON.parse(rest_output)
   
-      total_results = rest_output.headers[:x_rangelimit_total].to_i unless total_results
+      total_results = (rest_output.headers[:x_rangelimit_total].to_i - 1) unless total_results
       startpos = rest_output.headers[:x_rangelimit_startpos].to_i
       endpos = rest_output.headers[:x_rangelimit_endpos].to_i
-      next_startpos = endpos + 1
+      next_startpos = endpos
   
       # Make sure we don't create an endless loop and DoS someone's system
       zero_count += 1 if (startpos == 0)
